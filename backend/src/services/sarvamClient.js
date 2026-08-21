@@ -1,4 +1,6 @@
 const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
 const env = require('../config/env');
 const logger = require('../utils/logger');
 
@@ -93,32 +95,35 @@ async function chatCompletion({ systemPrompt, userPrompt, temperature = 0.2 }) {
  * error rather than silently returning empty text.
  */
 async function parseImageDocument({ filePath, sourceLanguage = 'en' }) {
-  // eslint-disable-next-line no-unused-vars -- file upload step (presigned
-  // URL + PUT) is pending verification against the live Sarvam schema; the
-  // job is created here and the caller receives a clear failure until that
-  // step is wired up, rather than silently skipping the file entirely.
   try {
-    const { data: job } = await client().post('/doc-digitization/job/v1', {
-      language_code: toSarvamLangCode(sourceLanguage),
-      output_format: 'json'
+    // Sarvam's current Document AI API accepts the file directly as multipart
+    // form data and starts a job in one request (not the legacy two-step API).
+    const form = new FormData();
+    form.append('file', new Blob([fs.readFileSync(filePath)]), path.basename(filePath));
+    form.append('language', toSarvamLangCode(sourceLanguage));
+    form.append('output_format', 'json');
+    const { data: job } = await client().post('/doc-ai/v1/job/digitise', form, {
+      headers: { 'Content-Type': 'multipart/form-data' }
     });
-
-    const jobId = job.job_id || job.jobId;
+    const jobId = job.job_id;
     if (!jobId) throw new Error('Sarvam document intelligence job creation did not return a job id');
 
-    // Poll for completion (short-lived, bounded loop for a local demo).
-    const maxAttempts = 20;
+    const maxAttempts = 24;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      // eslint-disable-next-line no-await-in-loop
-      const { data: status } = await client().get(`/doc-digitization/job/v1/${jobId}`);
-      if (status.status === 'Completed' || status.status === 'completed') {
-        return status.output_text || status.text || '';
+      const { data: status } = await client().get(`/doc-ai/v1/job/${jobId}/status`);
+      const state = String(status.status || '').toLowerCase();
+      if (state === 'completed' || state === 'partially_completed') {
+        const { data: results } = await client().get(`/doc-ai/v1/job/${jobId}/results`, { params: { format: 'json' } });
+        const documents = results.documents || [];
+        const text = documents.flatMap((document) => document.blocks || []).map((block) => block.text || '').filter(Boolean).join('\n\n');
+        if (!text) throw new Error('Sarvam document intelligence returned no text');
+        return text;
       }
-      if (status.status === 'Failed' || status.status === 'failed') {
+      if (state === 'failed' || state === 'rejected') {
         throw new Error('Sarvam document intelligence job failed');
       }
       // eslint-disable-next-line no-await-in-loop
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await new Promise((resolve) => setTimeout(resolve, 2000));
     }
     throw new Error('Sarvam document intelligence job timed out');
   } catch (err) {

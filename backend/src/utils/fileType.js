@@ -1,4 +1,7 @@
-const { fileTypeFromBuffer } = require('file-type');
+const fileType = require('file-type');
+// file-type v16 exposes `fromBuffer`; newer versions use `fileTypeFromBuffer`.
+// Supporting both keeps this security check aligned with the declared package.
+const fileTypeFromBuffer = fileType.fileTypeFromBuffer || fileType.fromBuffer;
 
 /**
  * Allowed upload types: Word documents, PDFs, and JPEG/PNG images.
