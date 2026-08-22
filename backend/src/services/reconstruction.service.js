@@ -1,6 +1,17 @@
 const fs = require('fs');
+const path = require('path');
 const PDFDocument = require('pdfkit');
-const { Document, Packer, Paragraph, HeadingLevel, Table, TableRow, TableCell, TextRun } = require('docx');
+const {
+  Document,
+  Packer,
+  Paragraph,
+  HeadingLevel,
+  Table,
+  TableRow,
+  TableCell,
+  TextRun,
+  WidthType
+} = require('docx');
 
 const HEADING_LEVELS = {
   1: HeadingLevel.HEADING_1,
@@ -11,88 +22,493 @@ const HEADING_LEVELS = {
   6: HeadingLevel.HEADING_6
 };
 
-/**
- * Rebuilds a .docx file from translated/refined blocks, preserving
- * headings, paragraphs, and tables.
- */
-async function buildDocx(blocks, outputPath) {
-  const children = blocks.map((block) => {
-    if (block.type === 'heading') {
-      return new Paragraph({
-        heading: HEADING_LEVELS[block.level] || HeadingLevel.HEADING_2,
-        children: [new TextRun({ text: block.text, bold: true })]
-      });
+const FONT_DIR = path.join(__dirname, '..', '..', 'assets');
+
+const LANGUAGE_FONT_MAP = {
+  hi: 'NotoSansDevanagari-Regular.ttf',
+  mr: 'NotoSansDevanagari-Regular.ttf',
+  bn: 'NotoSansBengali-Regular.ttf',
+  gu: 'NotoSansGujarati-Regular.ttf',
+  ta: 'NotoSansTamil-Regular.ttf',
+  te: 'NotoSansTelugu-Regular.ttf'
+};
+
+const DEFAULT_FONT = 'Helvetica';
+
+function registerFonts(doc) {
+  for (const [lang, filename] of Object.entries(LANGUAGE_FONT_MAP)) {
+    const fontPath = path.join(FONT_DIR, filename);
+
+    if (!fs.existsSync(fontPath)) {
+      throw new Error(
+        `Missing font file for "${lang}": expected at ${fontPath}`
+      );
     }
-    if (block.type === 'table') {
-      return new Table({
-        rows: block.rows.map(
-          (row) =>
-            new TableRow({
-              children: row.map(
-                (cell) =>
-                  new TableCell({
-                    children: [new Paragraph({ children: [new TextRun(cell || '')] })]
-                  })
-              )
+
+    doc.registerFont(lang, fontPath);
+  }
+}
+
+function fontFor(lang) {
+  return LANGUAGE_FONT_MAP[lang]
+    ? lang
+    : DEFAULT_FONT;
+}
+
+function buildDocxTable(rows) {
+  return new Table({
+    width: {
+      size: 100,
+      type: WidthType.PERCENTAGE
+    },
+    rows: rows.map((row, rowIndex) =>
+      new TableRow({
+        children: row.map(
+          (cell) =>
+            new TableCell({
+              children: [
+                new Paragraph({
+                  children: [
+                    new TextRun({
+                      text: String(cell || ''),
+                      bold: rowIndex === 0
+                    })
+                  ]
+                })
+              ]
             })
         )
-      });
+      })
+    )
+  });
+}
+
+async function buildDocx(blocks, outputPath) {
+  const children = [];
+
+  for (const block of blocks) {
+    if (block.type === 'heading') {
+      children.push(
+        new Paragraph({
+          heading:
+            HEADING_LEVELS[block.level] ||
+            HeadingLevel.HEADING_2,
+          children: [
+            new TextRun({
+              text: block.text || '',
+              bold: true
+            })
+          ]
+        })
+      );
+
+      continue;
     }
-    return new Paragraph({ children: [new TextRun(block.text || '')] });
+
+    if (block.type === 'table') {
+      children.push(
+        buildDocxTable(block.rows || [])
+      );
+
+      continue;
+    }
+
+    children.push(
+      new Paragraph({
+        children: [
+          new TextRun({
+            text: block.text || ''
+          })
+        ],
+        spacing: {
+          after: 160
+        }
+      })
+    );
+  }
+
+  const doc = new Document({
+    sections: [
+      {
+        children
+      }
+    ]
   });
 
-  const doc = new Document({ sections: [{ children }] });
-  const buffer = await Packer.toBuffer(doc);
-  fs.writeFileSync(outputPath, buffer);
+  const buffer =
+    await Packer.toBuffer(doc);
+
+  fs.writeFileSync(
+    outputPath,
+    buffer
+  );
+
   return outputPath;
 }
 
-/**
- * Rebuilds a .pdf file from translated/refined blocks. Used both for
- * PDF-in/PDF-out jobs and as the output format for image-in jobs, since an
- * image cannot be "reconstructed" with translated text in place.
- */
-async function buildPdf(blocks, outputPath) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50 });
-    const stream = fs.createWriteStream(outputPath);
-    doc.pipe(stream);
+function ensureSpace(doc, requiredHeight) {
+  const bottom =
+    doc.page.height -
+    doc.page.margins.bottom;
 
-    blocks.forEach((block) => {
-      if (block.type === 'heading') {
-        doc.fontSize(16 - (block.level || 2)).font('Helvetica-Bold').text(block.text, { paragraphGap: 8 });
-        doc.moveDown(0.3);
-      } else if (block.type === 'table') {
-        doc.fontSize(10).font('Helvetica');
-        block.rows.forEach((row) => {
-          doc.text(row.join('  |  '));
-        });
-        doc.moveDown(0.5);
-      } else {
-        doc.fontSize(11).font('Helvetica').text(block.text, { paragraphGap: 6 });
-        doc.moveDown(0.3);
-      }
-    });
-
-    doc.end();
-    stream.on('finish', () => resolve(outputPath));
-    stream.on('error', reject);
-  });
-}
-
-/**
- * @param {{ blocks: Array, sourceExt: string, outputPath: string }} params
- * @returns {Promise<{ outputPath: string, outputExt: 'docx'|'pdf' }>}
- */
-async function reconstructDocument({ blocks, sourceExt, outputPath }) {
-  if (sourceExt === 'docx') {
-    await buildDocx(blocks, outputPath);
-    return { outputPath, outputExt: 'docx' };
+  if (
+    doc.y + requiredHeight >
+    bottom
+  ) {
+    doc.addPage();
   }
-  // PDFs, and images (which have no "original format" to preserve),
-  // are both reconstructed as PDF output.
-  await buildPdf(blocks, outputPath);
-  return { outputPath, outputExt: 'pdf' };
 }
 
-module.exports = { reconstructDocument, buildDocx, buildPdf };
+function drawTable(doc, rows, fontName) {
+  if (!rows || !rows.length) {
+    return;
+  }
+
+  const columnCount =
+    Math.max(
+      ...rows.map(
+        (row) => row.length
+      )
+    );
+
+  if (!columnCount) {
+    return;
+  }
+
+  const pageWidth =
+    doc.page.width -
+    doc.page.margins.left -
+    doc.page.margins.right;
+
+  const columnWidth =
+    pageWidth / columnCount;
+
+  const padding = 6;
+  const fontSize = 10;
+  const lineGap = 2;
+
+  let rowIndex = 0;
+
+  while (rowIndex < rows.length) {
+    const row = rows[rowIndex];
+
+    const cellTexts =
+      Array.from(
+        { length: columnCount },
+        (_, index) =>
+          String(
+            row[index] || ''
+          )
+      );
+
+    doc.font(fontName);
+    doc.fontSize(fontSize);
+
+    const rowHeight =
+      Math.max(
+        ...cellTexts.map(
+          (text) => {
+            const height =
+              doc.heightOfString(
+                text,
+                {
+                  width:
+                    columnWidth -
+                    padding * 2,
+                  lineGap
+                }
+              );
+
+            return (
+              height +
+              padding * 2
+            );
+          }
+        )
+      );
+
+    ensureSpace(
+      doc,
+      rowHeight + 5
+    );
+
+    const startX =
+      doc.page.margins.left;
+
+    const startY =
+      doc.y;
+
+    for (
+      let columnIndex = 0;
+      columnIndex < columnCount;
+      columnIndex += 1
+    ) {
+      const x =
+        startX +
+        columnIndex *
+          columnWidth;
+
+      const text =
+        cellTexts[columnIndex];
+
+      doc
+        .rect(
+          x,
+          startY,
+          columnWidth,
+          rowHeight
+        )
+        .stroke();
+
+      if (rowIndex === 0) {
+        doc
+          .font(fontName)
+          .fontSize(fontSize)
+          .text(
+            text,
+            x + padding,
+            startY + padding,
+            {
+              width:
+                columnWidth -
+                padding * 2,
+              lineGap,
+              align: 'left'
+            }
+          );
+      } else {
+        doc
+          .font(fontName)
+          .fontSize(fontSize)
+          .text(
+            text,
+            x + padding,
+            startY + padding,
+            {
+              width:
+                columnWidth -
+                padding * 2,
+              lineGap,
+              align: 'left'
+            }
+          );
+      }
+    }
+
+    doc.y =
+      startY +
+      rowHeight;
+
+    rowIndex += 1;
+  }
+
+  doc.moveDown(0.8);
+}
+
+function drawHeading(
+  doc,
+  text,
+  level,
+  fontName
+) {
+  const sizes = {
+    1: 20,
+    2: 16,
+    3: 14,
+    4: 13,
+    5: 12,
+    6: 11
+  };
+
+  const size =
+    sizes[level] || 14;
+
+  const estimatedHeight =
+    size * 2.5;
+
+  ensureSpace(
+    doc,
+    estimatedHeight
+  );
+
+  doc
+    .font(fontName)
+    .fontSize(size)
+    .text(
+      text || '',
+      {
+        paragraphGap:
+          level === 1
+            ? 10
+            : 7
+      }
+    );
+
+  doc.moveDown(
+    level === 1
+      ? 0.5
+      : 0.25
+  );
+}
+
+function drawParagraph(
+  doc,
+  text,
+  fontName
+) {
+  if (!text || !text.trim()) {
+    return;
+  }
+
+  doc
+    .font(fontName)
+    .fontSize(11);
+
+  const availableWidth =
+    doc.page.width -
+    doc.page.margins.left -
+    doc.page.margins.right;
+
+  const estimatedHeight =
+    doc.heightOfString(
+      text,
+      {
+        width: availableWidth,
+        lineGap: 2
+      }
+    );
+
+  ensureSpace(
+    doc,
+    Math.min(
+      estimatedHeight + 10,
+      120
+    )
+  );
+
+  doc.text(
+    text,
+    {
+      width: availableWidth,
+      lineGap: 2,
+      paragraphGap: 6
+    }
+  );
+
+  doc.moveDown(0.25);
+}
+
+async function buildPdf(
+  blocks,
+  outputPath,
+  targetLanguage
+) {
+  return new Promise(
+    (resolve, reject) => {
+      const doc =
+        new PDFDocument({
+          margin: 50,
+          autoFirstPage: true
+        });
+
+      const stream =
+        fs.createWriteStream(
+          outputPath
+        );
+
+      doc.pipe(stream);
+
+      try {
+        registerFonts(doc);
+
+        const bodyFont =
+          fontFor(
+            targetLanguage
+          );
+
+        for (const block of blocks) {
+          if (
+            block.type ===
+            'heading'
+          ) {
+            drawHeading(
+              doc,
+              block.text,
+              block.level || 2,
+              bodyFont
+            );
+          } else if (
+            block.type ===
+            'table'
+          ) {
+            drawTable(
+              doc,
+              block.rows || [],
+              bodyFont
+            );
+          } else {
+            drawParagraph(
+              doc,
+              block.text,
+              bodyFont
+            );
+          }
+        }
+
+        doc.end();
+      } catch (err) {
+        reject(err);
+      }
+
+      stream.on(
+        'finish',
+        () => resolve(outputPath)
+      );
+
+      stream.on(
+        'error',
+        reject
+      );
+    }
+  );
+}
+
+async function reconstructDocument({
+  blocks,
+  sourceExt,
+  outputPath,
+  targetLanguage
+}) {
+  if (
+    sourceExt === 'docx'
+  ) {
+    await buildDocx(
+      blocks,
+      outputPath
+    );
+
+    return {
+      outputPath,
+      outputExt: 'docx'
+    };
+  }
+
+  await buildPdf(
+    blocks,
+    outputPath,
+    targetLanguage
+  );
+
+  return {
+    outputPath,
+    outputExt: 'pdf'
+  };
+}
+
+module.exports = {
+  reconstructDocument,
+  buildDocx,
+  buildPdf,
+  registerFonts,
+  fontFor
+};

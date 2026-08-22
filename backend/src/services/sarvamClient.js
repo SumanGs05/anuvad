@@ -64,23 +64,28 @@ async function translateText({ text, sourceLanguage = 'en', targetLanguage, mode
 /**
  * Sends a chat completion request to Sarvam's LLM for the refinement pass.
  */
-async function chatCompletion({ systemPrompt, userPrompt, temperature = 0.2 }) {
-  try {
-    const { data } = await client().post('/v1/chat/completions', {
-      model: 'sarvam-105b',
-      temperature,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt }
-      ]
-    });
-    return data.choices?.[0]?.message?.content ?? '';
-  } catch (err) {
-    logger.error('sarvamClient.chatCompletion failed', err);
-    throw new Error('Refinement provider request failed');
-  }
-}
+ async function chatCompletion({ systemPrompt, userPrompt, temperature = 0.2 }) {
+   try {
+     const { data } = await client().post('/v1/chat/completions', {
+       model: 'sarvam-105b',
+       temperature,
+       max_tokens: 4096,
+       reasoning_effort: null,
+       messages: [
+         { role: 'system', content: systemPrompt },
+         { role: 'user', content: userPrompt }
+       ]
+     });
 
+     return data.choices?.[0]?.message?.content ?? '';
+   } catch (err) {
+     logger.error(
+       'sarvamClient.chatCompletion failed',
+       err.response?.data || err
+     );
+     throw new Error('Refinement provider request failed');
+   }
+ }
 /**
  * Best-effort integration point for Sarvam's Document Intelligence
  * (OCR/digitisation) API for image ingestion, where no reliable local
