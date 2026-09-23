@@ -3,7 +3,12 @@ import { useEffect, useState } from 'react';
 import {
   createJob,
   getJob,
-  listJobs
+  listJobs,
+  deleteJob,
+  setTokens,
+  clearTokens,
+  getRefreshToken,
+  logoutRequest
 } from './api/client';
 
 import AuthPage from './pages/AuthPage';
@@ -17,45 +22,39 @@ function App() {
   );
 
   const [page, setPage] = useState('translate');
-
   const [file, setFile] = useState(null);
   const [targetLanguage, setTargetLanguage] = useState('hi');
-
   const [job, setJob] = useState(null);
   const [jobs, setJobs] = useState([]);
-
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // Listen for session expiry (triggered by 401 auto-refresh failure).
+  useEffect(() => {
+    function onExpired() {
+      setToken(null);
+      setJob(null);
+      setJobs([]);
+      setFile(null);
+    }
+    window.addEventListener('anuvad:session-expired', onExpired);
+    return () => window.removeEventListener('anuvad:session-expired', onExpired);
+  }, []);
+
   useEffect(() => {
     if (!token) return;
-
     loadJobs();
   }, [token]);
 
   useEffect(() => {
     if (!token || !job) return;
-
-    if (
-      job.status === 'completed' ||
-      job.status === 'failed'
-    ) {
-      return;
-    }
+    if (job.status === 'completed' || job.status === 'failed') return;
 
     const interval = setInterval(async () => {
       try {
-        const response = await getJob(
-          job._id,
-          token
-        );
-
+        const response = await getJob(job._id);
         setJob(response.job);
-
-        if (
-          response.job.status === 'completed' ||
-          response.job.status === 'failed'
-        ) {
+        if (response.job.status === 'completed' || response.job.status === 'failed') {
           clearInterval(interval);
           await loadJobs();
         }
@@ -69,28 +68,23 @@ function App() {
 
   async function loadJobs() {
     try {
-      const response = await listJobs(token);
+      const response = await listJobs();
       setJobs(response.jobs || []);
     } catch (err) {
       setError(err.message);
     }
   }
 
-  function handleLogin(accessToken) {
-    localStorage.setItem(
-      'anuvad_access_token',
-      accessToken
-    );
-
+  function handleLogin(accessToken, refreshToken) {
+    setTokens(accessToken, refreshToken);
     setToken(accessToken);
     setPage('translate');
   }
 
-  function handleLogout() {
-    localStorage.removeItem(
-      'anuvad_access_token'
-    );
-
+  async function handleLogout() {
+    const refreshToken = getRefreshToken();
+    await logoutRequest(refreshToken);
+    clearTokens();
     setToken(null);
     setJob(null);
     setJobs([]);
@@ -102,23 +96,25 @@ function App() {
       setError('Please select a document.');
       return;
     }
-
     setLoading(true);
     setError('');
-
     try {
-      const response = await createJob(
-        file,
-        targetLanguage,
-        token
-      );
-
+      const response = await createJob(file, targetLanguage);
       setJob(response.job);
       setPage('processing');
     } catch (err) {
       setError(err.message);
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleDeleteJob(jobId) {
+    try {
+      await deleteJob(jobId);
+      await loadJobs();
+    } catch (err) {
+      setError(err.message);
     }
   }
 
@@ -130,22 +126,17 @@ function App() {
   }
 
   if (!token) {
-    return (
-      <AuthPage
-        onLogin={handleLogin}
-      />
-    );
+    return <AuthPage onLogin={handleLogin} />;
   }
 
   if (page === 'history') {
     return (
       <HistoryPage
         jobs={jobs}
-        onNewTranslation={
-          startNewTranslation
-        }
+        onNewTranslation={startNewTranslation}
         onRefresh={loadJobs}
         onLogout={handleLogout}
+        onDeleteJob={handleDeleteJob}
       />
     );
   }
@@ -157,13 +148,12 @@ function App() {
         file={file}
         targetLanguage={targetLanguage}
         error={error}
-        onNewTranslation={
-          startNewTranslation
-        }
+        onNewTranslation={startNewTranslation}
         onHistory={() => {
           loadJobs();
           setPage('history');
         }}
+        onLogout={handleLogout}
       />
     );
   }
@@ -173,9 +163,7 @@ function App() {
       file={file}
       setFile={setFile}
       targetLanguage={targetLanguage}
-      setTargetLanguage={
-        setTargetLanguage
-      }
+      setTargetLanguage={setTargetLanguage}
       loading={loading}
       error={error}
       onTranslate={handleTranslate}
