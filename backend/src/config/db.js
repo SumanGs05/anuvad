@@ -1,16 +1,10 @@
 const mongoose = require('mongoose');
-const env = require('./env');
+const logger = require('../utils/logger');
 
-/**
- * Connects to MongoDB (local instance or Atlas, driven entirely by
- * MONGODB_URI). Never logs the connection string itself.
- */
-async function connectDB() {
-  mongoose.set('strictQuery', true);
-  await mongoose.connect(env.mongoUri);
-  // eslint-disable-next-line no-console
-  console.log(`[db] Connected to MongoDB (${mongoose.connection.name})`);
-  return mongoose.connection;
+async function connectDB(uri) {
+  const target = uri || require('./env').mongoUri;
+  await mongoose.connect(target);
+  logger.info('MongoDB connected');
 }
 
 async function disconnectDB() {

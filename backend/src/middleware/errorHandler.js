@@ -1,4 +1,5 @@
 const logger = require('../utils/logger');
+const env = require('../config/env');
 
 /**
  * Central error-handling middleware. Detailed error information (stack
@@ -14,7 +15,16 @@ function errorHandler(err, req, res, next) {
   }
 
   const status = err.status || 500;
-  const publicMessage = status < 500 && err.publicMessage ? err.publicMessage : 'Something went wrong. Please try again.';
+
+  // In production, never reveal internal error details or stack traces.
+  let publicMessage;
+  if (status < 500 && err.publicMessage) {
+    publicMessage = err.publicMessage;
+  } else if (env.nodeEnv !== 'production' && err.message) {
+    publicMessage = err.message;
+  } else {
+    publicMessage = 'Something went wrong. Please try again.';
+  }
 
   return res.status(status).json({ error: publicMessage });
 }
