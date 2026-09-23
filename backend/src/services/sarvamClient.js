@@ -5,16 +5,11 @@ const env = require('../config/env');
 const logger = require('../utils/logger');
 
 /**
- * Thin wrapper around the Sarvam AI REST APIs used by the pipeline:
- *  - POST /translate                for base machine translation
- *  - POST /v1/chat/completions      for the LLM refinement pass
- *
- * Kept as a single module so all outbound Sarvam calls are easy to mock in
- * unit tests and easy to swap out later (e.g. if Sarvam changes endpoint
- * shapes) without touching the rest of the pipeline.
+ * Thin wrapper around the Sarvam AI REST APIs used by the pipeline.
+ * API key is sent as a header only and is never logged.
+ * Retries on 429 and 5xx with exponential backoff (max 3 attempts).
  */
 
-// Maps our internal 2-letter target language codes to Sarvam's BCP-47 codes.
 const LANGUAGE_CODE_MAP = {
   en: 'en-IN',
   hi: 'hi-IN',
@@ -41,20 +36,48 @@ function client() {
 }
 
 /**
+ * Retry a request function on 429 (rate limit) or 5xx (server error).
+ * Uses exponential backoff: 1s, 2s, 4s (capped at maxAttempts=3).
+ */
+async function withRetry(fn, label) {
+  const maxAttempts = 3;
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      // eslint-disable-next-line no-await-in-loop
+      return await fn();
+    } catch (err) {
+      const status = err.response?.status;
+      const retryable = status === 429 || (status >= 500 && status <= 599);
+      if (!retryable || attempt === maxAttempts) {
+        lastErr = err;
+        break;
+      }
+      const delayMs = Math.pow(2, attempt - 1) * 1000; // 1s, 2s
+      logger.warn(`${label} retrying after ${delayMs}ms`, { attempt, status });
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * Translates a single chunk of text using the Sarvam Translate API.
- * The Translate API caps input length (~1000-2000 chars depending on
- * model), so callers are responsible for chunking longer text.
+ * Callers are responsible for chunking longer text.
  */
 async function translateText({ text, sourceLanguage = 'en', targetLanguage, mode = 'formal' }) {
   try {
-    const { data } = await client().post('/translate', {
-      input: text,
-      source_language_code: toSarvamLangCode(sourceLanguage),
-      target_language_code: toSarvamLangCode(targetLanguage),
-      mode,
-      model: 'sarvam-translate:v1'
-    });
-    return data.translated_text;
+    return await withRetry(async () => {
+      const { data } = await client().post('/translate', {
+        input: text,
+        source_language_code: toSarvamLangCode(sourceLanguage),
+        target_language_code: toSarvamLangCode(targetLanguage),
+        mode,
+        model: 'sarvam-translate:v1'
+      });
+      return data.translated_text;
+    }, 'sarvamClient.translateText');
   } catch (err) {
     logger.error('sarvamClient.translateText failed', err, { targetLanguage });
     throw new Error('Translation provider request failed');
@@ -64,49 +87,38 @@ async function translateText({ text, sourceLanguage = 'en', targetLanguage, mode
 /**
  * Sends a chat completion request to Sarvam's LLM for the refinement pass.
  */
- async function chatCompletion({ systemPrompt, userPrompt, temperature = 0.2 }) {
-   try {
-     const { data } = await client().post('/v1/chat/completions', {
-       model: 'sarvam-105b',
-       temperature,
-       max_tokens: 4096,
-       reasoning_effort: null,
-       messages: [
-         { role: 'system', content: systemPrompt },
-         { role: 'user', content: userPrompt }
-       ]
-     });
+async function chatCompletion({ systemPrompt, userPrompt, temperature = 0.2 }) {
+  try {
+    return await withRetry(async () => {
+      const { data } = await client().post('/v1/chat/completions', {
+        model: 'sarvam-105b',
+        temperature,
+        max_tokens: 4096,
+        reasoning_effort: null,
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt }
+        ]
+      });
+      return data.choices?.[0]?.message?.content ?? '';
+    }, 'sarvamClient.chatCompletion');
+  } catch (err) {
+    logger.error('sarvamClient.chatCompletion failed', err.response?.status ? { status: err.response.status } : err);
+    throw new Error('Refinement provider request failed');
+  }
+}
 
-     return data.choices?.[0]?.message?.content ?? '';
-   } catch (err) {
-     logger.error(
-       'sarvamClient.chatCompletion failed',
-       err.response?.data || err
-     );
-     throw new Error('Refinement provider request failed');
-   }
- }
 /**
- * Best-effort integration point for Sarvam's Document Intelligence
- * (OCR/digitisation) API for image ingestion, where no reliable local
- * parsing library exists. This uses Sarvam's documented job-based flow:
- * create a job, upload the file, then poll for completion and read back
- * the extracted text.
- *
- * NOTE: this is intentionally isolated behind a single function so it can
- * be fully mocked in tests, and so the exact polling/response handling can
- * be hardened against the live API without touching the rest of the
- * pipeline. On any failure it throws, and callers should surface a clear
- * error rather than silently returning empty text.
+ * Digitises an image document via Sarvam Doc AI.
+ * Uses a job-based flow: create -> poll -> fetch results.
  */
 async function parseImageDocument({ filePath, sourceLanguage = 'en' }) {
   try {
-    // Sarvam's current Document AI API accepts the file directly as multipart
-    // form data and starts a job in one request (not the legacy two-step API).
     const form = new FormData();
     form.append('file', new Blob([fs.readFileSync(filePath)]), path.basename(filePath));
     form.append('language', toSarvamLangCode(sourceLanguage));
     form.append('output_format', 'json');
+
     const { data: job } = await client().post('/doc-ai/v1/job/digitise', form, {
       headers: { 'Content-Type': 'multipart/form-data' }
     });
@@ -115,12 +127,18 @@ async function parseImageDocument({ filePath, sourceLanguage = 'en' }) {
 
     const maxAttempts = 24;
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      // eslint-disable-next-line no-await-in-loop
       const { data: status } = await client().get(`/doc-ai/v1/job/${jobId}/status`);
       const state = String(status.status || '').toLowerCase();
       if (state === 'completed' || state === 'partially_completed') {
+        // eslint-disable-next-line no-await-in-loop
         const { data: results } = await client().get(`/doc-ai/v1/job/${jobId}/results`, { params: { format: 'json' } });
         const documents = results.documents || [];
-        const text = documents.flatMap((document) => document.blocks || []).map((block) => block.text || '').filter(Boolean).join('\n\n');
+        const text = documents
+          .flatMap((document) => document.blocks || [])
+          .map((block) => block.text || '')
+          .filter(Boolean)
+          .join('\n\n');
         if (!text) throw new Error('Sarvam document intelligence returned no text');
         return text;
       }
@@ -132,7 +150,7 @@ async function parseImageDocument({ filePath, sourceLanguage = 'en' }) {
     }
     throw new Error('Sarvam document intelligence job timed out');
   } catch (err) {
-    logger.error('sarvamClient.parseImageDocument failed', err);
+    logger.error('sarvamClient.parseImageDocument failed', err instanceof Error ? err : new Error(String(err)));
     throw new Error('Image document parsing via Sarvam failed');
   }
 }

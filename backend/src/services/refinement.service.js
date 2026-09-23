@@ -208,25 +208,13 @@ async function refineText({
 
       if (refined && refined.trim()) {
         refinedChunks.push(refined.trim());
-
-        console.log(
-          `[105B] Refined chunk ${i + 1}/${originalChunks.length}`
-        );
       } else {
         // 105B returned empty — preserve the base translation.
         refinedChunks.push(translationChunk);
-
-        console.log(
-          `[105B] Empty response for chunk ${i + 1}/${originalChunks.length}; using base translation`
-        );
       }
     } catch (err) {
       // Never fail the entire document because refinement failed.
       refinedChunks.push(translationChunk);
-
-      console.log(
-        `[105B] Refinement failed for chunk ${i + 1}/${originalChunks.length}; using base translation`
-      );
     }
   }
 
