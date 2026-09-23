@@ -145,7 +145,7 @@ async function runPipeline(job) {
  * client does not poll forever.
  */
 async function sweepStuckJobs() {
-  const stuckStatuses = ['parsing', 'translating', 'refining', 'reconstructing'];
+  const stuckStatuses = ['uploaded', 'parsing', 'translating', 'refining', 'reconstructing'];
   const result = await Job.updateMany(
     { status: { $in: stuckStatuses } },
     {

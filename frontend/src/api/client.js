@@ -41,51 +41,62 @@ function friendlyMessage(status, serverMessage) {
 // Core request with 401 auto-refresh
 // --------------------------------------------------------------------------
 
-async function request(urlPath, options = {}, isRetry = false) {
+let refreshInFlight = null;
+
+// One refresh at a time. Refresh tokens are single-use, so two parallel
+// refreshes with the same token would make the second one fail and log the
+// user out.
+function refreshSession() {
+  if (refreshInFlight) return refreshInFlight;
+  const refreshToken = getRefreshToken();
+  if (!refreshToken) return Promise.resolve(false);
+
+  refreshInFlight = fetch(`${API_BASE_URL}/auth/refresh`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ refreshToken })
+  })
+    .then(async (res) => {
+      if (!res.ok) return false;
+      const data = await res.json();
+      setTokens(data.accessToken, data.refreshToken);
+      return true;
+    })
+    .catch(() => false)
+    .finally(() => {
+      refreshInFlight = null;
+    });
+
+  return refreshInFlight;
+}
+
+function expireSession() {
+  clearTokens();
+  window.dispatchEvent(new Event('anuvad:session-expired'));
+}
+
+// fetch with the bearer token, and one refresh + retry on 401.
+async function authedFetch(urlPath, options = {}, isRetry = false) {
   const token = getAccessToken();
   const headers = { ...(options.headers || {}) };
-  if (token) {
-    headers['Authorization'] = `Bearer ${token}`;
-  }
+  if (token) headers['Authorization'] = `Bearer ${token}`;
 
-  const response = await fetch(`${API_BASE_URL}${urlPath}`, {
-    ...options,
-    headers
-  });
+  const response = await fetch(`${API_BASE_URL}${urlPath}`, { ...options, headers });
 
-  // Auto-refresh on 401 (once only).
   if (response.status === 401 && !isRetry) {
-    const refreshToken = getRefreshToken();
-    if (refreshToken) {
-      try {
-        const refreshRes = await fetch(`${API_BASE_URL}/auth/refresh`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refreshToken })
-        });
-        if (refreshRes.ok) {
-          const refreshData = await refreshRes.json();
-          setTokens(refreshData.accessToken, refreshData.refreshToken);
-          // Retry the original request with the new token.
-          return request(urlPath, options, true);
-        }
-      } catch (_err) {
-        // Refresh failed; fall through to clear session.
-      }
-    }
-    // Could not refresh: clear session so UI redirects to login.
-    clearTokens();
-    window.dispatchEvent(new Event('anuvad:session-expired'));
-    const errData = await response.json().catch(() => ({}));
-    throw new Error(errData.error || 'Session expired. Please sign in again.');
+    if (await refreshSession()) return authedFetch(urlPath, options, true);
+    expireSession();
   }
+  return response;
+}
 
+async function request(urlPath, options = {}) {
+  const response = await authedFetch(urlPath, options);
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
     throw new Error(friendlyMessage(response.status, data.error || data.message));
   }
-
   return data;
 }
 
@@ -146,10 +157,7 @@ export async function deleteJob(jobId) {
 }
 
 export async function downloadJob(jobId) {
-  const token = getAccessToken();
-  const response = await fetch(`${API_BASE_URL}/jobs/${jobId}/download`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
+  const response = await authedFetch(`/jobs/${jobId}/download`);
 
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
