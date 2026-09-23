@@ -35,6 +35,19 @@ const authLimiter = rateLimit({
 });
 
 /**
+ * Refresh and logout are called automatically by the frontend, so they get
+ * their own, looser bucket. Login and register stay on the strict one.
+ */
+const refreshLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator,
+  message: { error: 'Too many token requests. Please try again later.' }
+});
+
+/**
  * Slightly stricter limiter for the upload endpoint, since it is the most
  * resource-intensive route.
  */
@@ -47,4 +60,4 @@ const uploadLimiter = rateLimit({
   message: { error: 'Too many upload requests. Please try again later.' }
 });
 
-module.exports = { generalLimiter, authLimiter, uploadLimiter };
+module.exports = { generalLimiter, authLimiter, refreshLimiter, uploadLimiter };
