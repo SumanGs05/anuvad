@@ -26,10 +26,22 @@ describe('refinement service', () => {
   test('creates a glossary-led prompt and retains the base translation when refinement is blank', async () => {
     expect(buildGlossarySection('hi')).toContain('intellectual property');
     expect(buildSystemPrompt('hi')).toContain('CIPAM');
+
+    // Use text longer than 400 chars so the length optimisation does not skip chatCompletion.
+    const longText = 'Hello '.repeat(80).trim(); // 479 chars
+    const longTranslation = 'नमस्ते '.repeat(80).trim();
+
     sarvamClient.chatCompletion.mockResolvedValue('   ');
-    await expect(refineText({ originalText: 'Hello', baseTranslation: 'नमस्ते', targetLanguage: 'hi' })).resolves.toBe('नमस्ते');
+    await expect(refineText({ originalText: longText, baseTranslation: longTranslation, targetLanguage: 'hi' })).resolves.toBe(longTranslation);
+
     sarvamClient.chatCompletion.mockResolvedValue('सुधारा');
-    await expect(refineBlocks([{ type: 'paragraph', text: 'Hello' }], [{ type: 'paragraph', text: 'नमस्ते' }], 'hi')).resolves.toEqual([{ type: 'paragraph', text: 'सुधारा' }]);
+    await expect(
+      refineBlocks(
+        [{ type: 'paragraph', text: longText }],
+        [{ type: 'paragraph', text: longTranslation }],
+        'hi'
+      )
+    ).resolves.toEqual([{ type: 'paragraph', text: 'सुधारा' }]);
   });
 });
 
