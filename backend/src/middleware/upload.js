@@ -3,13 +3,10 @@ const fs = require('fs');
 const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
 const { detectFileType } = require('../utils/fileType');
+const env = require('../config/env');
 
 const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10MB
-const UPLOAD_DIR = path.join(__dirname, '..', '..', 'storage', 'uploads');
-
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
-}
+const UPLOAD_DIR = path.join(env.storageDir, 'uploads');
 
 // Buffer the file in memory first so we can inspect its real bytes before
 // ever writing anything to disk with a client-controlled name.
@@ -26,9 +23,14 @@ const memoryUpload = multer({
  *  3. Rejects anything outside the allow-list (.docx, .pdf, .jpg, .png).
  *  4. Writes the file to disk under a random, non-guessable filename.
  *
- * On success, sets `req.uploadedFile = { path, filename, mime, ext, size }`.
+ * On success, sets `req.uploadedFile = { path, relativePath, filename, mime, ext, size, originalName }`.
  */
 function handleUpload(req, res, next) {
+  // Ensure upload directory exists (idempotent).
+  if (!fs.existsSync(UPLOAD_DIR)) {
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  }
+
   memoryUpload(req, res, async (err) => {
     if (err instanceof multer.MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE') {

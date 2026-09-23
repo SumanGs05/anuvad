@@ -1,14 +1,23 @@
 const rateLimit = require('express-rate-limit');
 
 /**
- * General API rate limit - generous enough for normal use, but bounds
- * abuse of any endpoint.
+ * Express-rate-limit uses req.ip by default. When app.set('trust proxy')
+ * is configured, Express resolves req.ip from X-Forwarded-For, so each
+ * real client IP gets its own bucket even behind Railway's load balancer.
+ */
+function keyGenerator(req) {
+  return req.ip || '::1';
+}
+
+/**
+ * General API rate limit - generous enough for normal use.
  */
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 300,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator,
   message: { error: 'Too many requests. Please try again later.' }
 });
 
@@ -21,18 +30,20 @@ const authLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator,
   message: { error: 'Too many authentication attempts. Please try again later.' }
 });
 
 /**
  * Slightly stricter limiter for the upload endpoint, since it is the most
- * resource-intensive route (kicks off the full translation pipeline).
+ * resource-intensive route.
  */
 const uploadLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator,
   message: { error: 'Too many upload requests. Please try again later.' }
 });
 

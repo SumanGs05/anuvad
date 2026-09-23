@@ -9,7 +9,8 @@ const JOB_STATUSES = [
   'refining',
   'reconstructing',
   'completed',
-  'failed'
+  'failed',
+  'expired'
 ];
 
 const SUPPORTED_LANGUAGES = ['hi', 'mr', 'bn', 'gu', 'ta', 'te'];
