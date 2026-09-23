@@ -2,9 +2,11 @@
 
 Local MVP for translating English CIPAM documents into Hindi, Marathi, Bengali, Gujarati, Tamil, or Telugu.
 
-## Setup
+See [DEPLOY.md](./DEPLOY.md) for the full Railway + Vercel deployment guide and pre-deploy checklist.
 
-1. Copy `backend/.env.example` to `backend/.env` and configure these variables: `PORT`, `NODE_ENV`, `MONGODB_URI`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `JWT_ACCESS_EXPIRES_IN`, `JWT_REFRESH_EXPIRES_IN`, `SARVAM_API_KEY`, `SARVAM_API_BASE_URL`, `MONGO_ENCRYPTION_KEY`, `MONGO_SIGNING_KEY`, and `CORS_ORIGIN`.
+## Local Setup
+
+1. Copy `backend/.env.example` to `backend/.env` and fill in the values.
 2. Copy `frontend/.env.example` to `frontend/.env` if the backend is not at `http://localhost:5000`.
 3. Install packages in each directory:
 
@@ -31,3 +33,10 @@ cd backend && npm test
 ```
 
 The suite uses mocks for Sarvam requests and an in-memory MongoDB server for API integration tests.
+
+## Architecture
+
+- **Backend:** Node.js + Express + Mongoose, hosted on Railway
+- **Frontend:** React + Vite, hosted on Vercel
+- **Translation:** Sarvam AI (translate API + optional 105B refinement)
+- **Storage:** Local filesystem on a Railway volume
